@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Token Defense — NextGames</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0a0f05; font-family:Arial, Helvetica, sans-serif; }
+  #game { display:block; width:100vw; height:100vh; touch-action:none; }
+  #overlay {
+    position:absolute; top:0; left:0; width:100%; height:100%;
+    display:flex; flex-direction:column; justify-content:center; align-items:center;
+    background:rgba(5,10,2,0.9); color:#fff; text-align:center; padding:24px; z-index:10;
+  }
+  #overlay h1 { font-size:42px; color:#ffd23f; margin-bottom:14px; text-shadow:0 0 16px #ffd23f; }
+  #overlay p { font-size:19px; line-height:1.5; max-width:620px; margin-bottom:10px; color:#e8f5d0; }
+  #overlay .fair { color:#7dff8a; font-size:20px; font-weight:bold; }
+  #bigbtn {
+    margin-top:20px; font-size:28px; font-weight:bold; padding:18px 54px;
+    background:#5a7a1e; color:#fff; border:3px solid #ffd23f; border-radius:14px; cursor:pointer;
+  }
+  #bigbtn:active { background:#ffd23f; color:#223; }
+  #buybtn {
+    margin-top:14px; font-size:20px; font-weight:bold; padding:12px 30px;
+    background:transparent; color:#ffd23f; border:2px solid #ffd23f; border-radius:12px; cursor:pointer;
+    text-decoration:none; display:inline-block;
+  }
+  #introVideo { max-width:92vw; max-height:50vh; border:2px solid #ffd23f; border-radius:12px; display:none; margin-bottom:14px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="overlay">
+  <h1>TOKEN DEFENSE</h1>
+  <video id="introVideo" src="intro.mp4" playsinline muted></video>
+  <p>The extermination force is coming for the planet — wave after wave, and it never stops learning.</p>
+  <p>Your tanks are yours. One token, one tank. Drag to move your line. They fire on their own.</p>
+  <p class="fair">A destroyed tank is never re-sold to you. It rests 2½ minutes and returns — free.
+  A tank destroyed 10 times is lost for good.</p>
+  <p id="fleetInfo"></p>
+  <button id="bigbtn">DEFEND</button>
+  <a id="buybtn" href="https://keywebster.gumroad.com" target="_blank" rel="noopener">BUY A TOKEN — $5 = 1 TANK</a>
+</div>
+<script>
+(function(){
+"use strict";
+var cv = document.getElementById('game');
+var ctx = cv.getContext('2d');
+var overlay = document.getElementById('overlay');
+var btn = document.getElementById('bigbtn');
+var fleetInfo = document.getElementById('fleetInfo');
+var introVideo = document.getElementById('introVideo');
+var W, H, DPR;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  cv.style.width = W+'px'; cv.style.height = H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize); resize();
+
+// ---------- persistent fleet (Roger's rules) ----------
+// A tank: { hp, deaths, dormantUntil } — dormant tanks return FREE after the timer.
+// Starter fleet: 3 training tanks. Purchased token tanks are added by fulfillment.
+var DORMANT_MS = 150000; // 2.5 minutes
+var MAX_DEATHS = 10;
+var fleet = [];
+function saveFleet(){
+  try { localStorage.setItem('tokenDefenseFleet', JSON.stringify(fleet)); } catch(e){}
+}
+function loadFleet(){
+  try {
+    var raw = localStorage.getItem('tokenDefenseFleet');
+    if(raw){ fleet = JSON.parse(raw); if(Array.isArray(fleet) && fleet.length) return; }
+  } catch(e){}
+  fleet = [newTank(), newTank(), newTank()];
+  saveFleet();
+}
+function newTank(){ return { deaths:0, dormantUntil:0 }; }
+loadFleet();
+
+// ---------- state ----------
+var running=false, gameOver=false;
+var score=0, wave=0, baseHp=100, baseMax=100;
+var bullets=[], ebullets=[], enemies=[], particles=[];
+var lineX=0, targetX=0; // horizontal offset of the tank line
+var spawnCd=0, fireCd=0, lastTime=0, shake=0;
+var keys={};
+
+var TANK_W=64, TANK_H=44, LINE_Y=0; // computed in reset
+function activeTanks(){
+  var now=Date.now(), out=[];
+  for(var i=0;i<fleet.length;i++){
+    if(fleet[i].dormantUntil<=now) out.push({idx:i, tank:fleet[i]});
+  }
+  return out;
+}
+function dormantList(){
+  var now=Date.now(), out=[];
+  for(var i=0;i<fleet.length;i++){
+    if(fleet[i].dormantUntil>now) out.push({idx:i, tank:fleet[i], secs:Math.ceil((fleet[i].dormantUntil-now)/1000)});
+  }
+  return out;
+}
+function fleetLine(){
+  return 'Your fleet: '+fleet.length+' tank'+(fleet.length===1?'':'s')+
+    ' — '+activeTanks().length+' ready, '+dormantList().length+' resting.';
+}
+fleetInfo.textContent = fleetLine();
+
+function reset(){
+  score=0; wave=0; baseHp=baseMax;
+  bullets=[]; ebullets=[]; enemies=[]; particles=[];
+  lineX=0; targetX=0; spawnCd=1; fireCd=0; shake=0; gameOver=false;
+  LINE_Y = H-140;
+}
+function tankPositions(){
+  var act = activeTanks();
+  var pos = [];
+  var n = act.length;
+  for(var i=0;i<n;i++){
+    var fx = n===1 ? 0.5 : (0.16 + 0.68*(i/(n-1)));
+    pos.push({ x: W*fx + lineX, y: LINE_Y, idx: act[i].idx, tank: act[i].tank, cd: Math.random()*0.2 });
+  }
+  return pos;
+}
+var fieldTanks = [];
+
+// ---------- input ----------
+window.addEventListener('keydown', function(e){ keys[e.key]=true; if(['ArrowLeft','ArrowRight',' '].indexOf(e.key)>=0) e.preventDefault(); });
+window.addEventListener('keyup', function(e){ keys[e.key]=false; });
+var dragging=false, dragX=0;
+function ptrDown(x){ dragging=true; dragX=x; }
+function ptrMove(x){ if(dragging){ targetX += (x-dragX); dragX=x; } }
+function ptrUp(){ dragging=false; }
+cv.addEventListener('touchstart', function(e){ ptrDown(e.touches[0].clientX); e.preventDefault(); }, {passive:false});
+cv.addEventListener('touchmove', function(e){ ptrMove(e.touches[0].clientX); e.preventDefault(); }, {passive:false});
+cv.addEventListener('touchend', ptrUp);
+cv.addEventListener('mousedown', function(e){ ptrDown(e.clientX); });
+window.addEventListener('mousemove', function(e){ ptrMove(e.clientX); });
+window.addEventListener('mouseup', ptrUp);
+
+// ---------- helpers ----------
+function rnd(a,b){ return a+Math.random()*(b-a); }
+function dist(ax,ay,bx,by){ var dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
+function explode(x,y,color,n,spd){
+  for(var i=0;i<(n||20);i++){
+    var a=Math.random()*Math.PI*2, s=rnd(40,(spd||240));
+    particles.push({x:x,y:y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:rnd(0.35,0.85),max:0.85,r:rnd(2,6),color:color||'#ffb347'});
+  }
+}
+
+// ---------- enemies ----------
+function spawnEnemy(){
+  var t=Math.random(), e;
+  var hpScale = 1 + wave*0.35, spScale = 1 + Math.min(1.6, wave*0.09);
+  if(wave>=6 && t<0.14){ e={type:'brute', w:84, h:56, hp:26*hpScale, spd:rnd(22,32)*spScale, fire:rnd(1,2), score:150}; }
+  else if(wave>=4 && t<0.42){ e={type:'flyer', w:52, h:30, hp:3*hpScale, spd:rnd(90,130)*spScale, wob:rnd(0,6.28), amp:rnd(30,70), score:60}; }
+  else if(t<0.66){ e={type:'raider', w:58, h:38, hp:8*hpScale, spd:rnd(38,55)*spScale, fire:rnd(1.4,2.8), score:50}; }
+  else { e={type:'trooper', w:30, h:40, hp:2*hpScale, spd:rnd(45,70)*spScale, score:25}; }
+  e.x = rnd(50, W-50); e.y = -60; e.maxhp = e.hp;
+  enemies.push(e);
+}
+
+// ---------- drawing ----------
+function drawTank(x, y, friendly, hpFrac){
+  ctx.save(); ctx.translate(x,y);
+  if(!friendly) ctx.rotate(Math.PI);
+  // tracks
+  ctx.fillStyle='#222';
+  ctx.fillRect(-TANK_W/2, -TANK_H/2, 12, TANK_H);
+  ctx.fillRect(TANK_W/2-12, -TANK_H/2, 12, TANK_H);
+  ctx.fillStyle='#444';
+  for(var i=0;i<4;i++){ ctx.fillRect(-TANK_W/2+2, -TANK_H/2+4+i*10, 8, 6); ctx.fillRect(TANK_W/2-10, -TANK_H/2+4+i*10, 8, 6); }
+  // hull
+  ctx.fillStyle = friendly ? '#4a6b1e' : '#6e1e1e';
+  ctx.fillRect(-TANK_W/2+10, -TANK_H/2+4, TANK_W-20, TANK_H-8);
+  // turret
+  ctx.fillStyle = friendly ? '#5f8a28' : '#8a2828';
+  ctx.beginPath(); ctx.arc(0,0,15,0,6.29); ctx.fill();
+  ctx.fillStyle = friendly ? '#ffd23f' : '#ff5a5a';
+  ctx.fillRect(-3.5,-34,7,22); // barrel
+  ctx.restore();
+  // hp bar
+  if(hpFrac!==undefined){
+    ctx.fillStyle='#300'; ctx.fillRect(x-28, y-TANK_H/2-14, 56, 7);
+    ctx.fillStyle = hpFrac>0.4 ? '#7dff8a' : '#ff5a5a';
+    ctx.fillRect(x-28, y-TANK_H/2-14, 56*Math.max(0,hpFrac), 7);
+  }
+}
+function drawEnemy(e){
+  if(e.type==='trooper'){
+    ctx.save(); ctx.translate(e.x, e.y);
+    ctx.fillStyle='#7a1020';
+    ctx.beginPath(); ctx.arc(0,-12,9,0,6.29); ctx.fill(); // head/helmet
+    ctx.fillStyle='#a01828'; ctx.fillRect(-9,-4,18,24);
+    ctx.fillStyle='#5a0a18';
+    var step = Math.sin(Date.now()/90 + e.x)*5;
+    ctx.fillRect(-9,20,7,14+step); ctx.fillRect(2,20,7,14-step);
+    ctx.fillStyle='#ffd9d9'; ctx.fillRect(8,-10,16,4); // rifle
+    ctx.restore();
+  } else if(e.type==='flyer'){
+    ctx.save(); ctx.translate(e.x + Math.sin(e.wob)*e.amp*0.4, e.y);
+    ctx.fillStyle='#3a0a4a'; ctx.strokeStyle='#c95af0'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.moveTo(0,14); ctx.lineTo(26,-10); ctx.lineTo(0,-4); ctx.lineTo(-26,-10); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#f0c8ff'; ctx.beginPath(); ctx.arc(0,0,4.5,0,6.29); ctx.fill();
+    ctx.restore();
+  } else {
+    drawTank(e.x, e.y, false);
+  }
+  // hp bar for tough enemies
+  if(e.maxhp>4){
+    ctx.fillStyle='#300'; ctx.fillRect(e.x-30, e.y-e.h/2-14, 60, 6);
+    ctx.fillStyle='#ff5a5a'; ctx.fillRect(e.x-30, e.y-e.h/2-14, 60*Math.max(0,e.hp/e.maxhp), 6);
+  }
+}
+
+// ---------- update ----------
+function update(dt){
+  // line movement
+  if(keys['ArrowLeft']||keys['a']) targetX -= 460*dt;
+  if(keys['ArrowRight']||keys['d']) targetX += 460*dt;
+  var maxOff = W*0.14;
+  targetX = Math.max(-maxOff, Math.min(maxOff, targetX));
+  lineX += (targetX-lineX)*Math.min(1, dt*10);
+  fieldTanks = tankPositions();
+
+  // spawning — endless escalation
+  spawnCd -= dt;
+  var interval = Math.max(0.45, 2.1 - wave*0.16);
+  if(spawnCd<=0){ spawnEnemy(); spawnCd = interval*rnd(0.7,1.3); }
+  // wave advances on kills threshold
+  var waveTarget = 10 + wave*6;
+  if(score > 0 && Math.floor(score/350) >= wave+1){ wave++; }
+
+  // tanks fire
+  for(var i=0;i<fieldTanks.length;i++){
+    var ft = fieldTanks[i];
+    ft.cd -= dt;
+    if(ft.cd<=0){
+      ft.cd = 0.42;
+      // aim at nearest enemy
+      var best=null, bd=1e9;
+      for(var j=0;j<enemies.length;j++){ var d=dist(ft.x,ft.y,enemies[j].x,enemies[j].y); if(d<bd){bd=d;best=enemies[j];} }
+      if(best && bd < H*0.95){
+        var a = Math.atan2(best.y-ft.y, best.x-ft.x);
+        bullets.push({x:ft.x, y:ft.y-30, vx:Math.cos(a)*560, vy:Math.sin(a)*560, r:5});
+      }
+    }
+  }
+  // enemy fire
+  for(var k=0;k<enemies.length;k++){
+    var e=enemies[k];
+    if(e.fire!==undefined){ e.fire-=dt;
+      if(e.fire<=0 && e.y>0 && e.y<LINE_Y-160){ e.fire=rnd(1.4,3.0);
+        ebullets.push({x:e.x, y:e.y+26, vx:rnd(-30,30), vy:280, r:5}); } }
+  }
+
+  // enemies move
+  for(var m=enemies.length-1;m>=0;m--){
+    var en=enemies[m];
+    if(en.type==='flyer') en.wob += dt*4;
+    en.y += en.spd*dt;
+    if(en.y > LINE_Y-30){
+      // broke the line — hits the base
+      baseHp -= en.type==='brute'? 20 : (en.type==='trooper'? 6 : 10);
+      explode(en.x, LINE_Y, '#ff5a5a', 18, 220); shake=0.4;
+      enemies.splice(m,1);
+      if(baseHp<=0){ baseHp=0; gameOver=true; explode(W/2, LINE_Y, '#ffffff', 70, 420); }
+      continue;
+    }
+  }
+  // player bullets
+  for(var b=bullets.length-1;b>=0;b--){
+    var bl=bullets[b]; bl.x+=bl.vx*dt; bl.y+=bl.vy*dt;
+    if(bl.y<-30||bl.x<-30||bl.x>W+30){ bullets.splice(b,1); continue; }
+    var hit=false;
+    for(var n=enemies.length-1;n>=0;n--){
+      var en2=enemies[n];
+      if(Math.abs(bl.x-en2.x) < en2.w/2+bl.r && Math.abs(bl.y-en2.y) < en2.h/2+bl.r){
+        en2.hp -= 1; hit=true; explode(bl.x,bl.y,'#ffe9a8',5,120);
+        if(en2.hp<=0){ explode(en2.x,en2.y,'#ffb347', en2.type==='brute'?44:20, 300); score+=en2.score; enemies.splice(n,1); }
+        break;
+      }
+    }
+    if(hit) bullets.splice(b,1);
+  }
+  // enemy bullets vs tanks
+  for(var q=ebullets.length-1;q>=0;q--){
+    var eb=ebullets[q]; eb.x+=eb.vx*dt; eb.y+=eb.vy*dt;
+    if(eb.y>H+20){ ebullets.splice(q,1); continue; }
+    var consumed=false;
+    for(var s=0;s<fieldTanks.length;s++){
+      var ft2=fieldTanks[s];
+      if(Math.abs(eb.x-ft2.x)<34 && Math.abs(eb.y-ft2.y)<26){
+        consumed=true;
+        ft2.tank.hp = (ft2.tank.hp===undefined? 10 : ft2.tank.hp) - 1;
+        explode(ft2.x, ft2.y, '#ffd23f', 8, 160);
+        if(ft2.tank.hp<=0){
+          // DESTROYED — Roger's rules: dormant 2.5 min, returns free; 10 deaths = lost
+          ft2.tank.deaths += 1;
+          explode(ft2.x, ft2.y, '#ff8a3c', 46, 360); shake=0.6;
+          if(ft2.tank.deaths >= MAX_DEATHS){
+            fleet.splice(ft2.idx,1);
+          } else {
+            ft2.tank.dormantUntil = Date.now()+DORMANT_MS;
+            ft2.tank.hp = 10;
+          }
+          saveFleet();
+        } else { saveFleet(); }
+        break;
+      }
+    }
+    if(consumed) ebullets.splice(q,1);
+  }
+  // tank-vs-enemy collision (ramming the line)
+  for(var c=enemies.length-1;c>=0;c--){
+    var en3=enemies[c];
+    for(var t2=0;t2<fieldTanks.length;t2++){
+      if(Math.abs(en3.x-fieldTanks[t2].x)<(en3.w+TANK_W)/2-8 && Math.abs(en3.y-fieldTanks[t2].y)<(en3.h+TANK_H)/2-6){
+        en3.hp -= 4; explode(en3.x,en3.y,'#ffb347',10,180);
+        if(en3.hp<=0){ score+=en3.score; enemies.splice(c,1); }
+        break;
+      }
+    }
+  }
+  // particles
+  for(var p=particles.length-1;p>=0;p--){
+    var pt=particles[p]; pt.x+=pt.vx*dt; pt.y+=pt.vy*dt; pt.vx*=0.98; pt.vy*=0.98; pt.life-=dt;
+    if(pt.life<=0) particles.splice(p,1);
+  }
+  if(shake>0) shake-=dt;
+  // all tanks dormant or lost and base still up: battle continues on base alone
+  if(fleet.length===0){ gameOver=true; }
+}
+
+// ---------- render ----------
+function render(){
+  ctx.save();
+  if(shake>0) ctx.translate(rnd(-1,1)*shake*18, rnd(-1,1)*shake*18);
+  // battlefield
+  var g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#131a2e'); g.addColorStop(0.6,'#1c2413'); g.addColorStop(1,'#2a3316');
+  ctx.fillStyle=g; ctx.fillRect(-30,-30,W+60,H+60);
+  // ground texture stripes
+  ctx.fillStyle='rgba(255,255,255,0.03)';
+  for(var gy=0; gy<H; gy+=46) ctx.fillRect(0, gy + (Date.now()/40)%46 - 46, W, 2);
+  // defense line
+  ctx.fillStyle='#ffd23f'; ctx.fillRect(0, LINE_Y+34, W, 4);
+  ctx.fillStyle='rgba(255,210,63,0.15)'; ctx.fillRect(0, LINE_Y+38, W, H-LINE_Y);
+  // enemies
+  for(var i=0;i<enemies.length;i++) drawEnemy(enemies[i]);
+  // bullets
+  ctx.shadowBlur=9;
+  for(var b=0;b<bullets.length;b++){ ctx.fillStyle='#ffe95a'; ctx.shadowColor='#ffe95a';
+    ctx.beginPath(); ctx.arc(bullets[b].x,bullets[b].y,bullets[b].r,0,6.29); ctx.fill(); }
+  for(var q=0;q<ebullets.length;q++){ ctx.fillStyle='#ff5a5a'; ctx.shadowColor='#ff5a5a';
+    ctx.beginPath(); ctx.arc(ebullets[q].x,ebullets[q].y,ebullets[q].r,0,6.29); ctx.fill(); }
+  ctx.shadowBlur=0;
+  // particles
+  for(var p=0;p<particles.length;p++){ var pt=particles[p];
+    ctx.globalAlpha=Math.max(0,pt.life/pt.max); ctx.fillStyle=pt.color;
+    ctx.beginPath(); ctx.arc(pt.x,pt.y,pt.r,0,6.29); ctx.fill(); }
+  ctx.globalAlpha=1;
+  // player tanks
+  fieldTanks = tankPositions();
+  for(var t=0;t<fieldTanks.length;t++){
+    var ft=fieldTanks[t];
+    var hp = ft.tank.hp===undefined? 10 : ft.tank.hp;
+    drawTank(ft.x, ft.y, true, hp/10);
+    // deaths pips
+    ctx.fillStyle='#ffd23f'; ctx.font='bold 13px Arial'; ctx.textAlign='center';
+    ctx.fillText('✚'.repeat(0) + (ft.tank.deaths>0 ? 'lost ×'+ft.tank.deaths+'/10' : ''), ft.x, ft.y+44);
+  }
+  ctx.restore();
+
+  // HUD (big, readable)
+  ctx.textBaseline='top';
+  ctx.fillStyle='#fff'; ctx.font='bold 25px Arial'; ctx.textAlign='left';
+  ctx.fillText('SCORE '+score, 14, 10);
+  ctx.fillText('WAVE '+(wave+1), 14, 42);
+  ctx.textAlign='right';
+  ctx.fillStyle = baseHp<=30 ? '#ff5a5a' : '#7dff8a';
+  ctx.fillText('BASE '+Math.max(0,Math.round(baseHp))+'%', W-14, 10);
+  ctx.fillStyle='#ffd23f';
+  ctx.fillText('TANKS '+activeTanks().length+'/'+fleet.length, W-14, 42);
+  // dormant countdowns
+  var dl = dormantList();
+  if(dl.length){
+    ctx.textAlign='center'; ctx.fillStyle='#ffb3b3'; ctx.font='bold 21px Arial';
+    var parts=[];
+    for(var d=0;d<dl.length;d++){ var s=dl[d].secs; parts.push('Tank resting: '+Math.floor(s/60)+':'+('0'+(s%60)).slice(-2)); }
+    ctx.fillText(parts.join('   '), W/2, 76);
+  }
+  if(gameOver){
+    ctx.fillStyle='rgba(5,5,0,0.72)'; ctx.fillRect(0,0,W,H);
+    ctx.textAlign='center';
+    ctx.fillStyle='#ff5a5a'; ctx.font='bold 42px Arial';
+    ctx.fillText(fleet.length===0 ? 'FLEET LOST' : 'BASE OVERRUN', W/2, H*0.34);
+    ctx.fillStyle='#e8f5d0'; ctx.font='23px Arial';
+    ctx.fillText('Final score: '+score+'   •   Reached wave '+(wave+1), W/2, H*0.43);
+    if(fleet.length>0 && dormantList().length){
+      ctx.fillStyle='#ffb3b3'; ctx.font='21px Arial';
+      ctx.fillText('Your resting tanks will return — free. The fleet endures.', W/2, H*0.5);
+    }
+    ctx.fillStyle='#ffd23f'; ctx.font='bold 29px Arial';
+    ctx.fillText('TAP TO DEFEND AGAIN', W/2, H*0.6+Math.sin(Date.now()/300)*6);
+  }
+}
+
+function loop(t){
+  var dt=Math.min(0.05,(t-lastTime)/1000||0.016); lastTime=t;
+  if(running && !gameOver) update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+cv.addEventListener('touchstart', function(){ if(running && gameOver){ reset(); } });
+cv.addEventListener('mousedown', function(){ if(running && gameOver){ reset(); } });
+
+// intro video slot — plays Roger's video at load if intro.mp4 is present
+introVideo.addEventListener('canplay', function(){
+  introVideo.style.display='block';
+  var p = introVideo.play(); if(p && p.catch) p.catch(function(){});
+});
+introVideo.addEventListener('click', function(){ introVideo.pause(); introVideo.style.display='none'; });
+
+btn.addEventListener('click', function(){
+  introVideo.pause();
+  overlay.classList.add('hidden');
+  loadFleet(); fleetInfo.textContent = fleetLine();
+  reset(); running=true;
+});
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
