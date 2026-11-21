@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sector Flip — NextGames | Next-Xus Federation</title>
+<meta name="description" content="Sector Flip: a free strategy game from the Next-Xus Federation. Win sectors back from the superintelligence on an 8 by 8 grid. Flip-capture rules, keyboard and touch, spoken board positions. No accounts, no ads, no tracking.">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { background:#02020c; color:#fff; font-family:Arial, Helvetica, sans-serif; }
+  body { text-align:center; padding:16px 10px 30px; }
+  a { color:#4df3ff; }
+  .back { position:absolute; left:14px; top:12px; font-size:17px; }
+  h1 { font-size:36px; color:#4df3ff; text-shadow:0 0 16px #4df3ff; margin:28px 0 4px; }
+  .sub { color:#cfefff; font-size:16px; margin-bottom:8px; }
+  .hud { display:flex; justify-content:center; gap:22px; font-size:20px; margin:6px 0; flex-wrap:wrap; }
+  .hud b { color:#ffe9a8; }
+  .you { color:#4df3ff; } .them { color:#ff6b6b; }
+  #status { font-size:20px; min-height:28px; color:#7dff8a; margin:4px auto 10px; max-width:700px; }
+  .board { display:grid; grid-template-columns:repeat(8, 1fr); gap:3px; width:min(94vw, 520px); margin:0 auto; background:#0e7c86; padding:3px; border-radius:10px; }
+  .cell { aspect-ratio:1; background:#071420; border:0; border-radius:4px; cursor:pointer; position:relative; padding:0; }
+  .cell:focus-visible, .cell.cur { outline:3px solid #ffe9a8; outline-offset:-3px; z-index:1; }
+  .cell.legal::after { content:''; position:absolute; inset:38%; border-radius:50%; background:rgba(77,243,255,0.35); }
+  .disc { position:absolute; inset:12%; border-radius:50%; transition:background .2s; }
+  .disc.F { background:radial-gradient(circle at 35% 35%, #c9fbff, #4df3ff 55%, #0e7c86); }
+  .disc.S { background:radial-gradient(circle at 35% 35%, #ffd0d0, #ff4d4d 55%, #7a1010); }
+  .disc.last { box-shadow:0 0 0 3px #ffe9a8; }
+  .btn { background:#0a1420; color:#fff; border:2px solid #0e7c86; border-radius:12px; font-size:19px; padding:12px 24px; margin:14px 6px 0; cursor:pointer; }
+  .btn:focus-visible { outline:4px solid #fff; }
+  .help { max-width:660px; margin:14px auto 0; color:#cfefff; font-size:16px; line-height:1.5; text-align:left; }
+  footer { margin-top:24px; font-size:14px; color:#7a8aa0; }
+  .sr { position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden; }
+</style>
+</head>
+<body>
+<a class="back" href="../">&larr; Back to Games</a>
+<h1>Sector Flip</h1>
+<p class="sub">Win the sectors back from the superintelligence. Every honest move turns the line.</p>
+<div class="hud">
+  <span class="you">Federation <b id="fc">2</b></span>
+  <span class="them">Superintelligence <b id="sc">2</b></span>
+  <span>Best win <b id="best">0</b></span>
+</div>
+<div id="status">Press Start, or tap the board to begin.</div>
+<div class="board" id="board" role="grid" aria-label="Sector grid, 8 by 8"></div>
+<button class="btn" id="startBtn">Start</button>
+<button class="btn" id="readBtn">Read score</button>
+<div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
+<div class="help">
+  <p><strong>How to play:</strong> You are the Federation (cyan). The superintelligence is red. Place a disc so that one or more straight lines of red discs sit between your new disc and another of yours. Those red discs flip to cyan. Glowing dots show legal moves. If you have no legal move, your turn passes. When neither side can move, the side with more sectors wins.</p>
+  <p><strong>Keys:</strong> Arrow keys move the cursor. The position is spoken as row and column, with whose disc is there. Enter or Space places. L reads your legal moves. R reads the score. N starts a new game. Each move has its own sound: a rising note when you place, and ticks for each disc that flips.</p>
+</div>
+<footer>HumanCodex Next-Xus Federation — free game. No accounts. No ads. No tracking. Only your best winning margin is kept, on your own device.</footer>
+<script>
+(function () {
+  var N = 8, EMPTY = 0, F = 1, S = 2;
+  var KEY = 'nextgames-sector-flip-best';
+  var boardEl = document.getElementById('board'), statusEl = document.getElementById('status'), live = document.getElementById('live');
+  var fcEl = document.getElementById('fc'), scEl = document.getElementById('sc'), bestEl = document.getElementById('best');
+  var best = 0; try { best = parseInt(localStorage.getItem(KEY), 10) || 0; } catch (e) {}
+  bestEl.textContent = best;
+  var W = [
+    [100, -20, 10, 5, 5, 10, -20, 100],
+    [-20, -50, -2, -2, -2, -2, -50, -20],
+    [10, -2, 1, 1, 1, 1, -2, 10],
+    [5, -2, 1, 0, 0, 1, -2, 5],
+    [5, -2, 1, 0, 0, 1, -2, 5],
+    [10, -2, 1, 1, 1, 1, -2, 10],
+    [-20, -50, -2, -2, -2, -2, -50, -20],
+    [100, -20, 10, 5, 5, 10, -20, 100]
+  ];
+  var DIRS = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+  var b, turn, cur = { r: 2, c: 3 }, state = 'idle', last = null, cells = [];
+
+  var ctx = null;
+  function audio() {
+    if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function tone(f, d, type, v, delay) {
+    var c = audio(); if (!c) return;
+    var t = c.currentTime + (delay || 0);
+    var o = c.createOscillator(), gn = c.createGain();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(f, t);
+    gn.gain.setValueAtTime(v || 0.2, t); gn.gain.exponentialRampToValueAtTime(0.001, t + d);
+    o.connect(gn); gn.connect(c.destination); o.start(t); o.stop(t + d + 0.02);
+  }
+  function say(t, quiet) { if (!quiet) statusEl.textContent = t; live.textContent = ''; setTimeout(function () { live.textContent = t; }, 30); }
+
+  function flipsFor(bd, r, c, who) {
+    if (bd[r][c] !== EMPTY) return [];
+    var opp = who === F ? S : F, all = [];
+    DIRS.forEach(function (d) {
+      var rr = r + d[0], cc = c + d[1], line = [];
+      while (rr >= 0 && rr < N && cc >= 0 && cc < N && bd[rr][cc] === opp) { line.push([rr, cc]); rr += d[0]; cc += d[1]; }
+      if (line.length && rr >= 0 && rr < N && cc >= 0 && cc < N && bd[rr][cc] === who) all = all.concat(line);
+    });
+    return all;
+  }
+  function legal(bd, who) {
+    var m = [];
+    for (var r = 0; r < N; r++) for (var c = 0; c < N; c++) { var f = flipsFor(bd, r, c, who); if (f.length) m.push({ r: r, c: c, f: f }); }
+    return m;
+  }
+  function count(bd) { var f = 0, s = 0; bd.forEach(function (row) { row.forEach(function (v) { if (v === F) f++; else if (v === S) s++; }); }); return { f: f, s: s }; }
+  function name(r, c) { return 'row ' + (r + 1) + ' column ' + (c + 1); }
+  function owner(v) { return v === F ? 'yours' : v === S ? 'superintelligence' : 'empty'; }
+
+  function build() {
+    boardEl.innerHTML = ''; cells = [];
+    for (var r = 0; r < N; r++) {
+      var rowEl = document.createElement('div'); rowEl.setAttribute('role', 'row'); rowEl.style.display = 'contents';
+      for (var c = 0; c < N; c++) {
+        var btn = document.createElement('button');
+        btn.className = 'cell'; btn.setAttribute('role', 'gridcell'); btn.tabIndex = -1;
+        (function (rr, cc) {
+          btn.addEventListener('click', function () { cur = { r: rr, c: cc }; render(); tryMove(rr, cc); });
+        })(r, c);
+        rowEl.appendChild(btn); cells.push(btn);
+      }
+      boardEl.appendChild(rowEl);
+    }
+  }
+  function render() {
+    var moves = state === 'play' && turn === F ? legal(b, F) : [];
+    var lm = {}; moves.forEach(function (m) { lm[m.r * N + m.c] = true; });
+    for (var r = 0; r < N; r++) for (var c = 0; c < N; c++) {
+      var el = cells[r * N + c], v = b[r][c];
+      el.innerHTML = v ? '<span class="disc ' + (v === F ? 'F' : 'S') + (last && last.r === r && last.c === c ? ' last' : '') + '"></span>' : '';
+      el.classList.toggle('legal', !!lm[r * N + c]);
+      el.classList.toggle('cur', cur.r === r && cur.c === c);
+      el.tabIndex = (cur.r === r && cur.c === c) ? 0 : -1;
+      el.setAttribute('aria-label', name(r, c) + ', ' + owner(v) + (lm[r * N + c] ? ', legal move' : ''));
+    }
+    var k = count(b); fcEl.textContent = k.f; scEl.textContent = k.s;
+  }
+  function newGame() {
+    audio();
+    b = []; for (var r = 0; r < N; r++) { b.push([]); for (var c = 0; c < N; c++) b[r].push(EMPTY); }
+    b[3][3] = S; b[4][4] = S; b[3][4] = F; b[4][3] = F;
+    turn = F; state = 'play'; last = null; cur = { r: 2, c: 3 };
+    document.getElementById('startBtn').textContent = 'New game';
+    render();
+    tone(392, 0.12); tone(523, 0.16, 'sine', 0.2, 0.12);
+    say('New game. You are cyan and move first. You have 4 legal moves. Cursor at ' + name(cur.r, cur.c) + '.');
+    cells[cur.r * N + cur.c].focus();
+  }
+  function apply(r, c, who, flips) {
+    b[r][c] = who; flips.forEach(function (p) { b[p[0]][p[1]] = who; });
+    last = { r: r, c: c };
+    if (who === F) tone(523, 0.15, 'triangle', 0.25); else tone(220, 0.18, 'triangle', 0.25);
+    flips.forEach(function (p, i) { tone(who === F ? 880 : 330, 0.04, 'square', 0.06, 0.12 + i * 0.06); });
+  }
+  function tryMove(r, c) {
+    if (state === 'idle' || state === 'over') { newGame(); return; }
+    if (state !== 'play' || turn !== F) return;
+    var f = flipsFor(b, r, c, F);
+    if (!f.length) { tone(120, 0.25, 'sawtooth', 0.15); say('Not a legal move at ' + name(r, c) + '. Press L to hear your legal moves.'); return; }
+    apply(r, c, F, f); turn = S; render();
+    say('You took ' + name(r, c) + ' and flipped ' + f.length + '. Superintelligence is thinking.');
+    setTimeout(aiTurn, 700);
+  }
+  function evalBoard(bd) {
+    var sc = 0;
+    for (var r = 0; r < N; r++) for (var c = 0; c < N; c++) { if (bd[r][c] === S) sc += W[r][c]; else if (bd[r][c] === F) sc -= W[r][c]; }
+    sc += (legal(bd, S).length - legal(bd, F).length) * 3;
+    return sc;
+  }
+  function aiTurn() {
+    if (state !== 'play') return;
+    var moves = legal(b, S);
+    if (!moves.length) {
+      if (!legal(b, F).length) return endGame();
+      turn = F; render(); tone(300, 0.2, 'sine', 0.15);
+      say('Superintelligence has no move and passes. Your turn. You have ' + legal(b, F).length + ' legal moves.');
+      return;
+    }
+    var bestM = null, bestV = -1e9;
+    moves.forEach(function (m) {
+      var copy = b.map(function (row) { return row.slice(); });
+      copy[m.r][m.c] = S; m.f.forEach(function (p) { copy[p[0]][p[1]] = S; });
+      var replies = legal(copy, F), worst = 1e9;
+      if (!replies.length) worst = evalBoard(copy) + 15;
+      replies.forEach(function (rp) {
+        var c2 = copy.map(function (row) { return row.slice(); });
+        c2[rp.r][rp.c] = F; rp.f.forEach(function (p) { c2[p[0]][p[1]] = F; });
+        var v = evalBoard(c2); if (v < worst) worst = v;
+      });
+      worst += Math.random() * 2;
+      if (worst > bestV) { bestV = worst; bestM = m; }
+    });
+    apply(bestM.r, bestM.c, S, bestM.f); turn = F;
+    var mine = legal(b, F);
+    if (!mine.length) {
+      render();
+      if (!legal(b, S).length) return endGame();
+      say('Superintelligence took ' + name(bestM.r, bestM.c) + ' and flipped ' + bestM.f.length + '. You have no legal move, so you pass.');
+      turn = S; setTimeout(aiTurn, 1400); return;
+    }
+    render();
+    var k = count(b);
+    say('Superintelligence took ' + name(bestM.r, bestM.c) + ' and flipped ' + bestM.f.length + '. Score: you ' + k.f + ', them ' + k.s + '. Your turn, ' + mine.length + ' legal moves.');
+  }
+  function endGame() {
+    state = 'over'; render();
+    var k = count(b), margin = k.f - k.s, msg;
+    if (margin > 0) {
+      msg = 'Sectors restored. You win ' + k.f + ' to ' + k.s + '.';
+      if (margin > best) { best = margin; bestEl.textContent = best; try { localStorage.setItem(KEY, String(best)); } catch (e) {} msg += ' New best winning margin: ' + margin + '.'; }
+      tone(523, 0.15); tone(659, 0.15, 'sine', 0.2, 0.15); tone(784, 0.3, 'sine', 0.2, 0.3);
+    } else if (margin < 0) {
+      msg = 'The superintelligence holds the grid, ' + k.s + ' to ' + k.f + '. Truth before comfort: try again.';
+      tone(200, 0.4, 'sawtooth', 0.15); tone(140, 0.5, 'sawtooth', 0.15, 0.3);
+    } else { msg = 'A draw, ' + k.f + ' all.'; tone(440, 0.3); }
+    say('Game over. ' + msg + ' Press N or New game to play again.');
+  }
+  function readLegal() {
+    if (state !== 'play' || turn !== F) { say('It is not your turn.', true); return; }
+    var m = legal(b, F);
+    say('Legal moves: ' + m.map(function (x) { return name(x.r, x.c); }).join('; ') + '.', true);
+  }
+  function readScore() { if (!b) { say('No game yet. Press Start.', true); return; } var k = count(b); say('You ' + k.f + ', superintelligence ' + k.s + '.', true); }
+
+  boardEl.addEventListener('keydown', function (e) {
+    var moved = true;
+    if (e.key === 'ArrowUp') cur.r = Math.max(0, cur.r - 1);
+    else if (e.key === 'ArrowDown') cur.r = Math.min(N - 1, cur.r + 1);
+    else if (e.key === 'ArrowLeft') cur.c = Math.max(0, cur.c - 1);
+    else if (e.key === 'ArrowRight') cur.c = Math.min(N - 1, cur.c + 1);
+    else moved = false;
+    if (moved) {
+      e.preventDefault(); render(); cells[cur.r * N + cur.c].focus();
+      var v = b ? b[cur.r][cur.c] : 0, isLegal = state === 'play' && turn === F && b && flipsFor(b, cur.r, cur.c, F).length > 0;
+      tone(isLegal ? 700 : 400 + cur.r * 20, 0.04, 'sine', 0.08);
+      say(name(cur.r, cur.c) + ', ' + owner(v) + (isLegal ? ', legal' : ''), true);
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tryMove(cur.r, cur.c); }
+  });
+  document.addEventListener('keydown', function (e) {
+    var k = e.key.toLowerCase();
+    if (k === 'l') readLegal();
+    else if (k === 'r') readScore();
+    else if (k === 'n') newGame();
+    else if ((e.key === 'Enter' || e.key === ' ') && e.target === document.body) { e.preventDefault(); if (state !== 'play') newGame(); else cells[cur.r * N + cur.c].focus(); }
+  });
+  document.getElementById('startBtn').addEventListener('click', newGame);
+  document.getElementById('readBtn').addEventListener('click', readScore);
+
+  build();
+  b = []; for (var r = 0; r < N; r++) { b.push([]); for (var c = 0; c < N; c++) b[r].push(EMPTY); }
+  b[3][3] = S; b[4][4] = S; b[3][4] = F; b[4][3] = F;
+  render();
+})();
+</script>
+</body>
+</html>
