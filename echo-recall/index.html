@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Echo Recall — NextGames | Next-Xus Federation</title>
+<meta name="description" content="Echo Recall: a free memory puzzle from the Next-Xus Federation. Listen to the signal, repeat it back. Sound cues, keyboard and touch. No accounts, no ads, no tracking.">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { background:#02020c; color:#fff; font-family:Arial, Helvetica, sans-serif; }
+  body { text-align:center; padding:16px 12px 32px; min-height:100vh; touch-action:manipulation; }
+  a { color:#4df3ff; }
+  .back { position:absolute; left:14px; top:12px; font-size:17px; }
+  h1 { font-size:38px; color:#4df3ff; text-shadow:0 0 16px #4df3ff; margin:28px 0 4px; }
+  .sub { color:#cfefff; font-size:17px; margin-bottom:12px; }
+  .hud { display:flex; justify-content:center; gap:28px; font-size:22px; margin:8px 0 6px; }
+  .hud b { color:#ffe9a8; }
+  #status { font-size:24px; min-height:32px; color:#7dff8a; margin:6px 0 10px; }
+  .board { display:grid; grid-template-columns:repeat(3, min(28vw, 140px)); grid-template-rows:repeat(3, min(28vw, 140px)); gap:10px; justify-content:center; margin:0 auto; }
+  .pad { border:3px solid #223; border-radius:22px; font-size:20px; font-weight:bold; color:#02020c; cursor:pointer; opacity:.45; transition:opacity .08s, transform .08s; }
+  .pad.lit { opacity:1; transform:scale(1.06); box-shadow:0 0 28px currentColor; }
+  .pad:focus-visible { outline:4px solid #fff; }
+  #p0 { grid-column:2; grid-row:1; background:#4df3ff; color:#02121a; }
+  #p1 { grid-column:3; grid-row:2; background:#ffe9a8; color:#1a1402; }
+  #p2 { grid-column:2; grid-row:3; background:#7dff8a; color:#021a06; }
+  #p3 { grid-column:1; grid-row:2; background:#ff7de9; color:#1a0216; }
+  .core { grid-column:2; grid-row:2; display:flex; align-items:center; justify-content:center; border-radius:50%; border:2px solid #0e7c86; color:#4df3ff; font-size:15px; }
+  .btn { background:#0a1420; color:#fff; border:2px solid #0e7c86; border-radius:12px; font-size:20px; padding:12px 26px; margin:16px 6px 4px; cursor:pointer; }
+  .btn:focus-visible { outline:4px solid #fff; }
+  .help { max-width:620px; margin:14px auto 0; color:#cfefff; font-size:16px; line-height:1.5; }
+  footer { margin-top:26px; font-size:14px; color:#7a8aa0; }
+  .sr { position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden; }
+</style>
+</head>
+<body>
+<a class="back" href="../">&larr; Back to Games</a>
+<h1>Echo Recall</h1>
+<p class="sub">Listen to the signal. Repeat it back. Truth before comfort: memory does not lie.</p>
+<div class="hud"><span>Score <b id="score">0</b></span><span>Best <b id="best">0</b></span></div>
+<div id="status">Press Start, Enter, or tap a pad.</div>
+<div class="board" role="group" aria-label="Signal pads">
+  <button class="pad" id="p0" aria-label="North pad, key Up or 1">N</button>
+  <button class="pad" id="p1" aria-label="East pad, key Right or 2">E</button>
+  <div class="core" aria-hidden="true">ECHO</div>
+  <button class="pad" id="p2" aria-label="South pad, key Down or 3">S</button>
+  <button class="pad" id="p3" aria-label="West pad, key Left or 4">W</button>
+</div>
+<button class="btn" id="startBtn">Start</button>
+<div id="live" class="sr" aria-live="assertive" aria-atomic="true"></div>
+<p class="help"><strong>How to play:</strong> The Federation core sends a signal: a run of tones and lights. When it says "your turn", repeat the run in order. Arrow keys or 1 to 4 on a keyboard, or tap the pads. Each pad has its own pitch: North is lowest, then East, South, and West is highest. Every round adds one more tone. One wrong tone ends the game.</p>
+<footer>HumanCodex Next-Xus Federation — free game. No accounts. No ads. No tracking. Only your best score is kept, on your own device.</footer>
+<script>
+(function () {
+  var FREQ = [262, 330, 392, 523];
+  var NAMES = ['North', 'East', 'South', 'West'];
+  var KEY = 'nextgames-echo-recall-best';
+  var pads = [0, 1, 2, 3].map(function (i) { return document.getElementById('p' + i); });
+  var scoreEl = document.getElementById('score');
+  var bestEl = document.getElementById('best');
+  var statusEl = document.getElementById('status');
+  var live = document.getElementById('live');
+  var startBtn = document.getElementById('startBtn');
+  var seq = [], pos = 0, score = 0, state = 'idle', timers = [];
+  var best = 0;
+  try { best = parseInt(localStorage.getItem(KEY), 10) || 0; } catch (e) { best = 0; }
+  bestEl.textContent = best;
+
+  var ctx = null;
+  function audio() {
+    if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { ctx = null; } }
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function tone(freq, dur, type, vol) {
+    var c = audio(); if (!c) return;
+    var o = c.createOscillator(), g = c.createGain();
+    o.type = type || 'sine'; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol || 0.25, c.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + dur);
+    o.connect(g); g.connect(c.destination);
+    o.start(); o.stop(c.currentTime + dur + 0.02);
+  }
+  function chime() { tone(523, 0.12); later(function () { tone(659, 0.12); }, 110); later(function () { tone(784, 0.2); }, 220); }
+  function buzz() { tone(110, 0.6, 'sawtooth', 0.3); }
+  function say(t) { statusEl.textContent = t; live.textContent = ''; setTimeout(function () { live.textContent = t; }, 30); }
+  function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+  function flash(i, ms) {
+    pads[i].classList.add('lit');
+    tone(FREQ[i], ms / 1000 * 0.9, 'triangle', 0.3);
+    later(function () { pads[i].classList.remove('lit'); }, ms);
+  }
+
+  function start() {
+    clearTimers(); audio();
+    seq = []; score = 0; scoreEl.textContent = '0';
+    startBtn.textContent = 'Restart';
+    nextRound();
+  }
+  function nextRound() {
+    seq.push(Math.floor(Math.random() * 4));
+    pos = 0; state = 'listen';
+    say('Round ' + seq.length + '. Listen.');
+    var step = Math.max(260, 620 - seq.length * 25);
+    var t0 = 900;
+    seq.forEach(function (p, k) { later(function () { flash(p, step * 0.8); }, t0 + k * step); });
+    later(function () { state = 'input'; say('Your turn. ' + seq.length + (seq.length === 1 ? ' tone.' : ' tones.')); }, t0 + seq.length * step + 150);
+  }
+  function press(i) {
+    if (state === 'idle' || state === 'over') { if (state === 'idle') { flash(i, 250); } start(); return; }
+    if (state !== 'input') return;
+    flash(i, 220);
+    if (i !== seq[pos]) { gameOver(i); return; }
+    pos++;
+    if (pos === seq.length) {
+      state = 'wait';
+      score = seq.length; scoreEl.textContent = score;
+      if (score > best) { best = score; bestEl.textContent = best; try { localStorage.setItem(KEY, String(best)); } catch (e) {} }
+      later(function () { chime(); say('Correct. Score ' + score + '.'); }, 300);
+      later(nextRound, 1400);
+    }
+  }
+  function gameOver(i) {
+    state = 'over'; clearTimers();
+    later(buzz, 150);
+    var right = NAMES[seq[pos]];
+    pads[seq[pos]].classList.add('lit');
+    later(function () { pads.forEach(function (p) { p.classList.remove('lit'); }); }, 1200);
+    say('Game over. You pressed ' + NAMES[i] + ', the signal was ' + right + '. Score ' + score + '. Best ' + best + '. Press Enter or Restart to play again.');
+  }
+
+  pads.forEach(function (p, i) {
+    p.addEventListener('pointerdown', function (e) { e.preventDefault(); press(i); });
+    p.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); press(i); } });
+  });
+  startBtn.addEventListener('click', start);
+  document.addEventListener('keydown', function (e) {
+    var map = { ArrowUp: 0, '1': 0, ArrowRight: 1, '2': 1, ArrowDown: 2, '3': 2, ArrowLeft: 3, '4': 3 };
+    if (e.key in map) { e.preventDefault(); press(map[e.key]); return; }
+    if ((e.key === 'Enter' || e.key === ' ') && e.target === document.body) { e.preventDefault(); if (state === 'idle' || state === 'over') start(); }
+  });
+})();
+</script>
+</body>
+</html>
