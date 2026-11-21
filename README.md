@@ -2,7 +2,7 @@
 
 Free games from the HumanCodex NextXus Federation. No accounts. No ads. No middlemen.
 
-Play the portal: https://keywebco.github.io/NextGames/
+Play the portal: https://next-xus.net/NextGames/
 
 ## The games
 
