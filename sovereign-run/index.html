@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Sovereign Run — NextGames | Next-Xus Federation</title>
+<meta name="description" content="Sovereign Run: a free endless runner from the Next-Xus Federation. A Federation robot outruns the surveillance grid. Jump the firewalls, duck the drones. Sound cues, keyboard and touch. No accounts, no ads, no tracking.">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { background:#02020c; color:#fff; font-family:Arial, Helvetica, sans-serif; }
+  body { text-align:center; padding:16px 10px 28px; touch-action:manipulation; -webkit-user-select:none; user-select:none; }
+  a { color:#4df3ff; }
+  .back { position:absolute; left:14px; top:12px; font-size:17px; }
+  h1 { font-size:36px; color:#4df3ff; text-shadow:0 0 16px #4df3ff; margin:28px 0 4px; }
+  .sub { color:#cfefff; font-size:16px; margin-bottom:8px; }
+  .hud { display:flex; justify-content:center; gap:28px; font-size:21px; margin:6px 0; }
+  .hud b { color:#ffe9a8; }
+  #status { font-size:20px; min-height:28px; color:#7dff8a; margin:4px 0 8px; }
+  canvas { width:min(96vw, 860px); height:auto; aspect-ratio:8/3; border:2px solid #0e7c86; border-radius:12px; background:#050a18; display:block; margin:0 auto; touch-action:none; }
+  .ctl { display:flex; justify-content:center; gap:14px; margin-top:12px; flex-wrap:wrap; }
+  .btn { background:#0a1420; color:#fff; border:2px solid #0e7c86; border-radius:12px; font-size:20px; padding:14px 28px; cursor:pointer; min-width:120px; }
+  .btn:focus-visible { outline:4px solid #fff; }
+  .help { max-width:640px; margin:14px auto 0; color:#cfefff; font-size:16px; line-height:1.5; }
+  footer { margin-top:24px; font-size:14px; color:#7a8aa0; }
+  .sr { position:absolute; left:-9999px; width:1px; height:1px; overflow:hidden; }
+</style>
+</head>
+<body>
+<a class="back" href="../">&larr; Back to Games</a>
+<h1>Sovereign Run</h1>
+<p class="sub">The surveillance grid wants you logged. The Federation robot keeps running free.</p>
+<div class="hud"><span>Score <b id="score">0</b></span><span>Best <b id="best">0</b></span></div>
+<div id="status">Press Space, Up, or tap to start.</div>
+<canvas id="c" width="800" height="300" aria-label="Sovereign Run play field"></canvas>
+<div class="ctl">
+  <button class="btn" id="jumpBtn">Jump</button>
+  <button class="btn" id="duckBtn">Duck</button>
+</div>
+<div id="live" class="sr" aria-live="polite" aria-atomic="true"></div>
+<p class="help"><strong>How to play:</strong> Jump over the red firewalls on the ground. Duck under the purple drones that fly at head height. Space, Up, or W jumps. Hold Down or S to duck. On a phone, tap the top half of the field to jump and hold the bottom half to duck, or use the buttons. <strong>Listen:</strong> a low double beep means a firewall is coming, so jump. A high beep means a drone is coming, so duck. The run gets faster the longer you last.</p>
+<footer>HumanCodex Next-Xus Federation — free game. No accounts. No ads. No tracking. Only your best score is kept, on your own device.</footer>
+<script>
+(function () {
+  var cv = document.getElementById('c'), g = cv.getContext('2d');
+  var W = 800, H = 300, GROUND = 250;
+  var scoreEl = document.getElementById('score'), bestEl = document.getElementById('best');
+  var statusEl = document.getElementById('status'), live = document.getElementById('live');
+  var KEY = 'nextgames-sovereign-run-best';
+  var best = 0; try { best = parseInt(localStorage.getItem(KEY), 10) || 0; } catch (e) {}
+  bestEl.textContent = best;
+
+  var ctx = null;
+  function audio() {
+    if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+  function tone(f, d, type, v, delay) {
+    var c = audio(); if (!c) return;
+    var t = c.currentTime + (delay || 0);
+    var o = c.createOscillator(), gn = c.createGain();
+    o.type = type || 'square'; o.frequency.setValueAtTime(f, t);
+    gn.gain.setValueAtTime(v || 0.12, t); gn.gain.exponentialRampToValueAtTime(0.001, t + d);
+    o.connect(gn); gn.connect(c.destination); o.start(t); o.stop(t + d + 0.02);
+  }
+  function say(t) { statusEl.textContent = t; live.textContent = ''; setTimeout(function () { live.textContent = t; }, 30); }
+
+  var state = 'idle', bot, obs, speed, dist, score, spawnIn, lastT, ducking = false, nextAnnounce, stars = [];
+  for (var i = 0; i < 60; i++) stars.push({ x: Math.random() * W, y: Math.random() * (GROUND - 20), s: Math.random() * 1.5 + 0.3 });
+
+  function reset() {
+    bot = { x: 110, y: GROUND, vy: 0, w: 34, h: 54 };
+    obs = []; speed = 330; dist = 0; score = 0; spawnIn = 1.4; nextAnnounce = 100;
+    scoreEl.textContent = '0';
+  }
+  function start() {
+    audio(); reset(); state = 'run'; lastT = performance.now();
+    say('Run. Jump the firewalls, duck the drones.');
+    tone(440, 0.1); tone(660, 0.15, 'square', 0.12, 0.1);
+  }
+  function jump() {
+    if (state !== 'run') { if (state === 'idle' || (state === 'over' && performance.now() - overAt > 700)) start(); return; }
+    if (bot.y >= GROUND && !ducking) { bot.vy = -760; tone(520, 0.08, 'triangle', 0.15); }
+  }
+  var overAt = 0;
+  function setDuck(on) {
+    if (state !== 'run') { if (on) jump(); return; }
+    if (on && !ducking) tone(300, 0.06, 'triangle', 0.12);
+    ducking = on;
+    if (on && bot.y < GROUND) bot.vy = Math.max(bot.vy, 600);
+  }
+  function spawn() {
+    var drone = dist > 400 && Math.random() < 0.38;
+    if (drone) {
+      obs.push({ type: 'drone', x: W + 20, y: GROUND - 62, w: 46, h: 22, warned: false, passed: false });
+    } else {
+      var tall = Math.random() < 0.3 ? 52 : 36;
+      obs.push({ type: 'wall', x: W + 20, y: GROUND - tall, w: 24 + Math.random() * 14, h: tall, warned: false, passed: false });
+    }
+    var gap = Math.max(0.75, 1.6 - dist / 6000) + Math.random() * 0.7;
+    spawnIn = gap;
+  }
+  function hit(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+  function update(dt) {
+    speed = 330 + Math.min(420, dist / 12);
+    dist += speed * dt;
+    score = Math.floor(dist / 10);
+    scoreEl.textContent = score;
+    if (score >= nextAnnounce) { live.textContent = 'Score ' + nextAnnounce; tone(880, 0.05, 'sine', 0.06); nextAnnounce += 100; }
+    bot.vy += 2200 * dt; bot.y += bot.vy * dt;
+    if (bot.y >= GROUND) { bot.y = GROUND; bot.vy = 0; }
+    var bh = ducking && bot.y >= GROUND ? 28 : 54;
+    var box = { x: bot.x + 4, y: bot.y - bh, w: bot.w - 8, h: bh - 2 };
+    spawnIn -= dt; if (spawnIn <= 0) spawn();
+    var warnDist = speed * 0.85;
+    for (var i = obs.length - 1; i >= 0; i--) {
+      var o = obs[i]; o.x -= speed * dt;
+      if (!o.warned && o.x - (bot.x + bot.w) < warnDist) {
+        o.warned = true;
+        if (o.type === 'wall') { tone(196, 0.07, 'square', 0.14); tone(196, 0.07, 'square', 0.14, 0.11); }
+        else { tone(988, 0.12, 'sine', 0.14); }
+      }
+      if (!o.passed && o.x + o.w < bot.x) { o.passed = true; tone(660, 0.04, 'sine', 0.05); }
+      if (hit(box, o)) { gameOver(o); return; }
+      if (o.x + o.w < -30) obs.splice(i, 1);
+    }
+  }
+  function gameOver(o) {
+    state = 'over'; overAt = performance.now();
+    tone(150, 0.5, 'sawtooth', 0.2); tone(90, 0.6, 'sawtooth', 0.2, 0.15);
+    var newBest = score > best;
+    if (newBest) { best = score; bestEl.textContent = best; try { localStorage.setItem(KEY, String(best)); } catch (e) {} }
+    say('Caught by a ' + (o.type === 'wall' ? 'firewall' : 'drone') + '. Score ' + score + '. ' + (newBest ? 'New best!' : 'Best ' + best + '.') + ' Press Space or tap to run again.');
+  }
+
+  function draw() {
+    g.fillStyle = '#050a18'; g.fillRect(0, 0, W, H);
+    var off = (state === 'run' ? dist : 0) * 0.1;
+    g.fillStyle = '#3a4a6a';
+    stars.forEach(function (s) { var x = ((s.x - off * s.s) % W + W) % W; g.fillRect(x, s.y, s.s * 2, s.s * 2); });
+    g.strokeStyle = '#0e7c86'; g.lineWidth = 3; g.beginPath(); g.moveTo(0, GROUND + 1); g.lineTo(W, GROUND + 1); g.stroke();
+    g.fillStyle = '#0b2a33';
+    var d = (dist % 40);
+    for (var x = -d; x < W; x += 40) g.fillRect(x, GROUND + 8, 20, 3);
+    obs.forEach(function (o) {
+      if (o.type === 'wall') {
+        g.fillStyle = '#ff4d4d'; g.fillRect(o.x, o.y, o.w, o.h);
+        g.fillStyle = '#ffb3b3'; for (var yy = o.y + 6; yy < o.y + o.h; yy += 12) g.fillRect(o.x + 3, yy, o.w - 6, 3);
+      } else {
+        g.fillStyle = '#c77dff'; g.beginPath(); g.ellipse(o.x + o.w / 2, o.y + o.h / 2, o.w / 2, o.h / 2, 0, 0, Math.PI * 2); g.fill();
+        g.fillStyle = '#ff4d4d'; g.fillRect(o.x + o.w / 2 - 3, o.y + o.h / 2 - 3, 6, 6);
+      }
+    });
+    var bh = ducking && bot.y >= GROUND && state === 'run' ? 28 : 54;
+    var bx = bot.x, by = bot.y - bh;
+    g.fillStyle = '#4df3ff'; g.fillRect(bx, by, bot.w, bh);
+    g.fillStyle = '#02020c'; g.fillRect(bx + 20, by + 8, 8, 6);
+    g.fillStyle = '#ffe9a8'; g.fillRect(bx + 6, by + bh - 8, 8, 8); g.fillRect(bx + 20, by + bh - 8, 8, 8);
+    g.fillStyle = '#cfefff'; g.font = 'bold 18px Arial'; g.textAlign = 'left';
+    g.fillText('Score ' + score, 14, 26);
+    if (state !== 'run') {
+      g.fillStyle = 'rgba(2,2,12,0.72)'; g.fillRect(0, 0, W, H);
+      g.textAlign = 'center'; g.fillStyle = '#4df3ff'; g.font = 'bold 40px Arial';
+      g.fillText(state === 'idle' ? 'SOVEREIGN RUN' : 'CAUGHT', W / 2, 120);
+      g.fillStyle = '#ffe9a8'; g.font = '22px Arial';
+      g.fillText(state === 'idle' ? 'Space, Up, or tap to run' : 'Score ' + score + '   Best ' + best, W / 2, 165);
+      if (state === 'over') { g.fillStyle = '#cfefff'; g.fillText('Space or tap to run again', W / 2, 200); }
+    }
+  }
+  function loop(t) {
+    var dt = Math.min(0.05, (t - (lastT || t)) / 1000); lastT = t;
+    if (state === 'run') update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  reset(); requestAnimationFrame(loop);
+
+  document.addEventListener('keydown', function (e) {
+    if (e.repeat && (e.key === ' ' || e.key === 'ArrowUp')) { e.preventDefault(); return; }
+    if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W' || e.key === 'Enter') {
+      if (e.target && e.target.tagName === 'BUTTON' && e.key !== 'ArrowUp') return;
+      e.preventDefault(); jump();
+    } else if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') { e.preventDefault(); setDuck(true); }
+  });
+  document.addEventListener('keyup', function (e) {
+    if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') setDuck(false);
+  });
+  cv.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    var r = cv.getBoundingClientRect();
+    if ((e.clientY - r.top) / r.height > 0.55 && state === 'run') setDuck(true); else jump();
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) { cv.addEventListener(ev, function () { if (ducking) setDuck(false); }); });
+  var jb = document.getElementById('jumpBtn'), db = document.getElementById('duckBtn');
+  jb.addEventListener('pointerdown', function (e) { e.preventDefault(); jump(); });
+  jb.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jump(); } });
+  db.addEventListener('pointerdown', function (e) { e.preventDefault(); setDuck(true); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) { db.addEventListener(ev, function () { setDuck(false); }); });
+})();
+</script>
+</body>
+</html>
